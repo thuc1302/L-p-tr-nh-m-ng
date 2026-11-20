@@ -1,0 +1,104 @@
+name: chatly
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SEED_DEMO: ${SEED_DEMO:-true}
+      UPLOAD_DIR: /app/uploads
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+    volumes:
+      - uploads:/app/uploads
+      - ./runtime:/run/chatly:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      # HTTP chi dung tren may nay; may khac trong LAN vao qua HTTPS.
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+      - "${HTTPS_BIND:-0.0.0.0}:${HTTPS_PORT:-8443}:443"
+    volumes:
+      - certs:/etc/nginx/certs
+      - ./runtime:/run/chatly:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Theo doi IP mang LAN cua may (doi Wi-Fi thi IP doi) de cap nhat chung chi HTTPS tu dong.
+  lan-watch:
+    image: alpine:3.22
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./scripts/lan-watch.sh:/lan-watch.sh:ro
+      - ./runtime:/run/chatly
+    command: ["sh", "/lan-watch.sh"]
+
+  pgadmin:
+    image: dpage/pgadmin4:9
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@chatly.dev
+      PGADMIN_DEFAULT_PASSWORD: ${POSTGRES_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Sinh file pgpass tu .env de pgAdmin ket noi san, khong can nhap mat khau.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "db:5432:*:$$POSTGRES_USER:$$POSTGRES_PASSWORD" > /tmp/pgpass
+        chmod 600 /tmp/pgpass
+        exec /entrypoint.sh
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:
+  certs:
+  uploads:
+  pgadmin-data:
